@@ -6,6 +6,7 @@ import torch
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
 import rclpy
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -30,10 +31,10 @@ class DepthMonocularVision(Node):
         self.bridge = CvBridge()
         self.yolo_model = load_yolo_model(device)
         self.depth_model = load_depth_model(device)
-        self.executor = ThreadPoolExecutor(max_workers=2)
         self.lock = threading.Lock()
         self.current_frame = None
         self.processed_frame = None
+        self.process_thread = None
 
     def process_frame(self, frame):
         resized_frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT))
@@ -71,16 +72,20 @@ class DepthMonocularVision(Node):
             self.current_frame = frame
 
         # Xử lý frame trong một thread riêng
-        future = self.executor.submit(self.process_frame, frame)
-        future.add_done_callback(self._process_frame_callback)
+        if self.process_thread is None or not self.process_thread.is_alive():
+            self.process_thread = threading.Thread(target=self._process_frame)
+            self.process_thread.start()
 
-    def _process_frame_callback(self, future):
-        try:
-            processed_frame = future.result()
-            with self.lock:
-                self.processed_frame = processed_frame
-        except Exception as e:
-            self.get_logger().error(f"Error processing frame: {e}")
+    def _process_frame(self):
+        with self.lock:
+            frame = self.current_frame
+        if frame is not None:
+            try:
+                processed_frame = self.process_frame(frame)
+                with self.lock:
+                    self.processed_frame = processed_frame
+            except Exception as e:
+                self.get_logger().error(f"Error processing frame: {e}")
 
 def main(args=None):
     rclpy.init(args=args)
@@ -91,12 +96,15 @@ def main(args=None):
     display_thread.daemon = True
     display_thread.start()
     
+    # Sử dụng MultiThreadedExecutor
+    executor = MultiThreadedExecutor()
+    executor.add_node(depth_monocular_vision)
+    
     try:
-        rclpy.spin(depth_monocular_vision)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
-        depth_monocular_vision.executor.shutdown()
         depth_monocular_vision.destroy_node()
         rclpy.shutdown()
 
